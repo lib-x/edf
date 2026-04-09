@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 
@@ -506,6 +507,19 @@ func classifyAttachmentPayload(payload []byte) attachmentPayloadKind {
 	if limit > 0 && printable*100/max(1, limit) >= 85 {
 		return attachmentPayloadKind{extension: ".txt", contentType: "text/plain"}
 	}
+
+	sniff := http.DetectContentType(payload[:min(len(payload), 512)])
+	switch sniff {
+	case "application/pdf":
+		return attachmentPayloadKind{extension: ".pdf", contentType: sniff}
+	case "application/zip":
+		return attachmentPayloadKind{extension: ".zip", contentType: sniff}
+	case "application/gzip", "application/x-gzip":
+		return attachmentPayloadKind{extension: ".gz", contentType: "application/gzip"}
+	case "text/plain; charset=utf-8":
+		return attachmentPayloadKind{extension: ".txt", contentType: "text/plain"}
+	}
+
 	return attachmentPayloadKind{}
 }
 
