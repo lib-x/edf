@@ -279,6 +279,24 @@ func ParseSyncRows(rows []DecodedRow) ([]SyncRecord, error) {
 	return out, nil
 }
 
+// AttachmentPayloadSummary captures the public, sample-free metadata that can be inferred
+// from a recovered attachment name and payload bytes.
+type AttachmentPayloadSummary struct {
+	CurrentName  string
+	FallbackName string
+	Info         AttachmentPayloadInfo
+}
+
+// SummarizeAttachmentPayload combines attachment naming and content-type inference
+// into one stable public helper.
+func SummarizeAttachmentPayload(currentName string, payload []byte, fallback string) AttachmentPayloadSummary {
+	return AttachmentPayloadSummary{
+		CurrentName:  currentName,
+		FallbackName: fallback,
+		Info:         InspectAttachmentPayload(currentName, payload, fallback),
+	}
+}
+
 // ReadSyncRecords decodes rows from the Sync table into stable semantic records.
 func (db *Database) ReadSyncRecords(limit, offset int) ([]SyncRecord, error) {
 	rows, err := db.ReadDecodedRows("Sync", limit, offset)

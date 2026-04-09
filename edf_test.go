@@ -92,6 +92,26 @@ func TestParseSyncRecord(t *testing.T) {
 	}
 }
 
+func TestSummarizeAttachmentPayload(t *testing.T) {
+	payload := mustZipPayload(t, map[string]string{"[Content_Types].xml": "x", "xl/workbook.xml": "x"})
+	summary := edf.SummarizeAttachmentPayload("sheet.bin", payload, "sheet.bin")
+	if summary.CurrentName != "sheet.bin" {
+		t.Fatalf("CurrentName = %q", summary.CurrentName)
+	}
+	if summary.FallbackName != "sheet.bin" {
+		t.Fatalf("FallbackName = %q", summary.FallbackName)
+	}
+	if summary.Info.Filename != "sheet.xlsx" {
+		t.Fatalf("Filename = %q", summary.Info.Filename)
+	}
+	if summary.Info.ContentType != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
+		t.Fatalf("ContentType = %q", summary.Info.ContentType)
+	}
+	if summary.Info.Extension != ".xlsx" {
+		t.Fatalf("Extension = %q", summary.Info.Extension)
+	}
+}
+
 func TestParseSyncRows(t *testing.T) {
 	rows := []edf.DecodedRow{
 		{Values: map[string]edf.DecodedValue{
