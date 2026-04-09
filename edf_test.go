@@ -92,6 +92,33 @@ func TestParseSyncRecord(t *testing.T) {
 	}
 }
 
+func TestParseSyncRows(t *testing.T) {
+	rows := []edf.DecodedRow{
+		{Values: map[string]edf.DecodedValue{
+			"ItemId":      {Kind: edf.DecodedString, String: "aaed9485e7514a4c81730acee0005420"},
+			"UpdateCount": {Kind: edf.DecodedInt32, Int32: 2},
+			"Modified":    {Kind: edf.DecodedBool, Bool: true},
+			"Deleted":     {Kind: edf.DecodedBool, Bool: false},
+		}},
+		{Values: map[string]edf.DecodedValue{
+			"ItemId":      {Kind: edf.DecodedString, String: "95ca9323b18347abb435b75b6f223ea0"},
+			"UpdateCount": {Kind: edf.DecodedInt32, Int32: 1},
+			"Modified":    {Kind: edf.DecodedBool, Bool: true},
+			"Deleted":     {Kind: edf.DecodedBool, Bool: false},
+		}},
+	}
+	records, err := edf.ParseSyncRows(rows)
+	if err != nil {
+		t.Fatalf("ParseSyncRows() error = %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("record count = %d, want 2", len(records))
+	}
+	if records[1].ItemID != "95ca9323b18347abb435b75b6f223ea0" || records[1].UpdateCount != 1 {
+		t.Fatalf("unexpected second record: %+v", records[1])
+	}
+}
+
 func TestParseSyncRecordRejectsWrongKinds(t *testing.T) {
 	_, err := edf.ParseSyncRecord(map[string]edf.DecodedValue{
 		"ItemId":      {Kind: edf.DecodedRaw},

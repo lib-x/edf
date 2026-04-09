@@ -266,6 +266,28 @@ func InspectAttachmentPayload(currentName string, payload []byte, fallback strin
 	}
 }
 
+// ParseSyncRows converts decoded Sync rows into stable semantic records.
+func ParseSyncRows(rows []DecodedRow) ([]SyncRecord, error) {
+	out := make([]SyncRecord, 0, len(rows))
+	for _, row := range rows {
+		record, err := ParseSyncRecord(row.Values)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, record)
+	}
+	return out, nil
+}
+
+// ReadSyncRecords decodes rows from the Sync table into stable semantic records.
+func (db *Database) ReadSyncRecords(limit, offset int) ([]SyncRecord, error) {
+	rows, err := db.ReadDecodedRows("Sync", limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSyncRows(rows)
+}
+
 // ParseSyncRecord converts a decoded Sync table row into a stable semantic record.
 func ParseSyncRecord(values map[string]DecodedValue) (SyncRecord, error) {
 	var record SyncRecord
