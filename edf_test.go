@@ -25,6 +25,8 @@ func TestInferAttachmentFilename(t *testing.T) {
 		{name: "rar keeps archive extension", currentName: "archive.bin", fallback: "archive.bin", payload: append([]byte("Rar!"), []byte("rest")...), want: "archive.rar"},
 		{name: "gzip keeps gzip extension", currentName: "dump.bin", fallback: "dump.bin", payload: append([]byte{0x1f, 0x8b, 0x08}, []byte("rest")...), want: "dump.gz"},
 		{name: "printable text falls back to txt", currentName: "notes.bin", fallback: "notes.bin", payload: []byte("hello world\nsecond line\n"), want: "notes.txt"},
+		{name: "text keeps source code extension", currentName: "BoundReceiver.cs", fallback: "BoundReceiver.bin", payload: []byte("using System;\nclass X {}\n"), want: "BoundReceiver.cs"},
+		{name: "text keeps installer script extension", currentName: "install.nsi", fallback: "install.bin", payload: []byte("!define PRODUCT_NAME \"demo\"\n"), want: "install.nsi"},
 		{name: "already good extension is preserved", currentName: "spec.docx", fallback: "spec.bin", payload: mustZipPayload(t, map[string]string{"[Content_Types].xml": "x", "word/document.xml": "x"}), want: "spec.docx"},
 	}
 	for _, tt := range tests {

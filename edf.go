@@ -221,6 +221,35 @@ func (db *Database) DecodeValue(tableName, fieldName string, raw []byte) (Decode
 
 // InferAttachmentFilename normalizes an attachment filename using the current
 // name, payload magic, and a fallback identifier.
+func preserveTextualAttachmentExtension(name string) bool {
+	return strings.HasSuffix(strings.ToLower(name), ".txt") ||
+		strings.HasSuffix(strings.ToLower(name), ".csv") ||
+		strings.HasSuffix(strings.ToLower(name), ".md") ||
+		strings.HasSuffix(strings.ToLower(name), ".json") ||
+		strings.HasSuffix(strings.ToLower(name), ".xml") ||
+		strings.HasSuffix(strings.ToLower(name), ".ini") ||
+		strings.HasSuffix(strings.ToLower(name), ".conf") ||
+		strings.HasSuffix(strings.ToLower(name), ".yaml") ||
+		strings.HasSuffix(strings.ToLower(name), ".yml") ||
+		strings.HasSuffix(strings.ToLower(name), ".log") ||
+		strings.HasSuffix(strings.ToLower(name), ".cs") ||
+		strings.HasSuffix(strings.ToLower(name), ".go") ||
+		strings.HasSuffix(strings.ToLower(name), ".py") ||
+		strings.HasSuffix(strings.ToLower(name), ".js") ||
+		strings.HasSuffix(strings.ToLower(name), ".ts") ||
+		strings.HasSuffix(strings.ToLower(name), ".java") ||
+		strings.HasSuffix(strings.ToLower(name), ".kt") ||
+		strings.HasSuffix(strings.ToLower(name), ".cpp") ||
+		strings.HasSuffix(strings.ToLower(name), ".c") ||
+		strings.HasSuffix(strings.ToLower(name), ".h") ||
+		strings.HasSuffix(strings.ToLower(name), ".hpp") ||
+		strings.HasSuffix(strings.ToLower(name), ".sh") ||
+		strings.HasSuffix(strings.ToLower(name), ".bat") ||
+		strings.HasSuffix(strings.ToLower(name), ".ps1") ||
+		strings.HasSuffix(strings.ToLower(name), ".au3") ||
+		strings.HasSuffix(strings.ToLower(name), ".nsi")
+}
+
 func InferAttachmentFilename(currentName string, payload []byte, fallback string) string {
 	base := normalizeAttachmentFilename(currentName, fallback)
 	if len(payload) == 0 {
@@ -244,7 +273,14 @@ func InferAttachmentFilename(currentName string, payload []byte, fallback string
 				return base
 			}
 		}
+		if kind.extension == ".txt" && preserveTextualAttachmentExtension(base) {
+			return base
+		}
 		return replaceAttachmentExt(base, kind.extension)
+	}
+
+	if InferAttachmentContentType(payload) == "text/plain" && preserveTextualAttachmentExtension(base) {
+		return base
 	}
 
 	return base
