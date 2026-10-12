@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -77,6 +78,83 @@ type AttachmentPayloadInfo struct {
 	Extension   string
 }
 
+type ArticleRecord struct {
+	TableName      string
+	Sequence       int
+	ID             string
+	ParentID       string
+	IsFolder       bool
+	ArticleFormat  int32
+	IconID         int32
+	Title          string
+	Keywords       string
+	TagIDList      string
+	Content        []byte
+	ContentText    string
+	Date           string
+	Time           string
+	WeatherIconID  string
+	WeatherText    string
+	ModifyDateTime string
+	CreateDateTime string
+	WordCount      int32
+	SortCode       int32
+	Deleted        bool
+	Values         map[string]DecodedValue
+}
+
+type AttachmentRecord struct {
+	Sequence      int
+	ID            string
+	ContentID     string
+	OwnerID       string
+	Name          string
+	Comment       string
+	Payload       []byte
+	PayloadText   string
+	Info          AttachmentPayloadInfo
+	MetaValues    map[string]DecodedValue
+	ContentValues map[string]DecodedValue
+}
+
+type TagRecord struct {
+	TableName    string
+	Sequence     int
+	ID           string
+	Name         string
+	SortCode     int32
+	IsPreCreated bool
+	Values       map[string]DecodedValue
+}
+
+type FieldDecodeSummary struct {
+	Name           string
+	TypeCode       uint16
+	Values         int
+	Raw            int
+	String         int
+	Bool           int
+	Int32          int
+	Int64          int
+	Date           int
+	Time           int
+	DateTime       int
+	External       int
+	NonEmptyString int
+	NonEmptyBytes  int
+}
+
+type TableDecodeSummary struct {
+	Name           string
+	Rows           int
+	Fields         []FieldDecodeSummary
+	Values         int
+	Raw            int
+	Decoded        int
+	NonEmptyString int
+	NonEmptyBytes  int
+}
+
 type SyncRecord struct {
 	ItemID      string
 	UpdateCount int32
@@ -91,6 +169,7 @@ const (
 	DecodedString   = irisdb.DecodedString
 	DecodedBool     = irisdb.DecodedBool
 	DecodedInt32    = irisdb.DecodedInt32
+	DecodedInt64    = irisdb.DecodedInt64
 	DecodedDate     = irisdb.DecodedDate
 	DecodedTime     = irisdb.DecodedTime
 	DecodedDateTime = irisdb.DecodedDateTime
@@ -111,9 +190,47 @@ func Open(path string) (*Database, error) {
 	return &Database{file: file}, nil
 }
 
+// OpenWithPassword opens an `.edf` file and enables password-based decoding for
+// encrypted row payloads. The password is used exactly as supplied.
+func OpenWithPassword(path string, password []byte) (*Database, error) {
+	file, err := irisdb.OpenWithPassword(path, password)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Database{file: file}, nil
+}
+
+// OpenWithPasswordFile opens an `.edf` file using a password read from a local
+// text file. Surrounding whitespace in the password file is ignored.
+func OpenWithPasswordFile(path string, passwordPath string) (*Database, error) {
+	data, err := os.ReadFile(passwordPath)
+	if err != nil {
+		return nil, fmt.Errorf("read password file: %w", err)
+	}
+	password := strings.TrimSpace(string(data))
+	if password == "" {
+		return nil, fmt.Errorf("password file is empty")
+	}
+	return OpenWithPassword(path, []byte(password))
+}
+
 // Path returns the underlying file path.
 func (db *Database) Path() string {
 	return db.file.Path()
+}
+
+// PasswordVerified reports whether the supplied password matches the known EDF
+// header validation block. A false result means either no password was supplied,
+// the password did not match, or the file uses an unsupported validation variant.
+func (db *Database) PasswordVerified() bool {
+	return db.file.PasswordVerified()
+}
+
+// PasswordSupplied reports whether this database was opened with a non-empty
+// password.
+func (db *Database) PasswordSupplied() bool {
+	return db.file.PasswordSupplied()
 }
 
 // Tables returns the parsed table metadata.
@@ -174,30 +291,20 @@ func (db *Database) ReadRawRows(tableName string, limit, offset int) ([]RawRow, 
 
 // ReadDecodedRows reads rows and decodes any fields that are currently understood.
 func (db *Database) ReadDecodedRows(tableName string, limit, offset int) ([]DecodedRow, error) {
-	table, ok := db.Table(tableName)
-	if !ok {
-		return nil, ErrTableNotFound
-	}
-
-	rawRows, err := db.ReadRawRows(tableName, limit, offset)
+	source, err := db.file.ReadDecodedRows(tableName, limit, offset)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, irisdb.ErrTableNotFound) || errors.Is(err, irisdb.ErrRecordLayoutUnavailable) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("read decoded rows for %s: %w", tableName, err)
 	}
 
-	out := make([]DecodedRow, 0, len(rawRows))
-	for _, raw := range rawRows {
-		values := make(map[string]DecodedValue, len(table.Fields))
-		for idx, field := range table.Fields {
-			decoded, err := db.DecodeValue(tableName, field.Name, raw.Values[idx])
-			if err != nil {
-				return nil, fmt.Errorf("decode %s.%s: %w", tableName, field.Name, err)
-			}
-			values[field.Name] = decoded
-		}
+	out := make([]DecodedRow, 0, len(source))
+	for _, row := range source {
 		out = append(out, DecodedRow{
-			Sequence: raw.Sequence,
-			Bitmap:   raw.Bitmap,
-			Values:   values,
+			Sequence: row.Sequence,
+			Bitmap:   row.Bitmap,
+			Values:   row.Values,
 		})
 	}
 
@@ -217,6 +324,86 @@ func (db *Database) ReadRawAttachmentContentRows(limit, offset int) ([]RawRow, e
 // DecodeValue decodes one raw field value when a decoder is currently known.
 func (db *Database) DecodeValue(tableName, fieldName string, raw []byte) (DecodedValue, error) {
 	return db.file.DecodeValue(tableName, fieldName, raw)
+}
+
+// DecodeSummaries reports per-table and per-field decoding coverage. It is
+// useful for inspecting partially understood EDF files without reading raw rows
+// manually.
+func (db *Database) DecodeSummaries() ([]TableDecodeSummary, error) {
+	tables := db.Tables()
+	out := make([]TableDecodeSummary, 0, len(tables))
+	for _, table := range tables {
+		if !table.Queryable {
+			continue
+		}
+		rows, err := db.ReadDecodedRows(table.Name, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, SummarizeDecodedRows(table, rows))
+	}
+	return out, nil
+}
+
+// SummarizeDecodedRows reports decoding coverage for one table.
+func SummarizeDecodedRows(table Table, rows []DecodedRow) TableDecodeSummary {
+	summary := TableDecodeSummary{
+		Name:   table.Name,
+		Rows:   len(rows),
+		Fields: make([]FieldDecodeSummary, 0, len(table.Fields)),
+	}
+
+	for _, field := range table.Fields {
+		fieldSummary := FieldDecodeSummary{
+			Name:     field.Name,
+			TypeCode: field.TypeCode,
+		}
+		for _, row := range rows {
+			value, ok := row.Values[field.Name]
+			if !ok {
+				continue
+			}
+			accumulateFieldDecodeSummary(&fieldSummary, value)
+		}
+		summary.Values += fieldSummary.Values
+		summary.Raw += fieldSummary.Raw
+		summary.NonEmptyString += fieldSummary.NonEmptyString
+		summary.NonEmptyBytes += fieldSummary.NonEmptyBytes
+		summary.Fields = append(summary.Fields, fieldSummary)
+	}
+	summary.Decoded = summary.Values - summary.Raw
+	return summary
+}
+
+func accumulateFieldDecodeSummary(summary *FieldDecodeSummary, value DecodedValue) {
+	summary.Values++
+	if value.String != "" {
+		summary.NonEmptyString++
+	}
+	if len(value.Bytes) > 0 {
+		summary.NonEmptyBytes++
+	}
+
+	switch value.Kind {
+	case DecodedRaw:
+		summary.Raw++
+	case DecodedString:
+		summary.String++
+	case DecodedBool:
+		summary.Bool++
+	case DecodedInt32:
+		summary.Int32++
+	case DecodedInt64:
+		summary.Int64++
+	case DecodedDate:
+		summary.Date++
+	case DecodedTime:
+		summary.Time++
+	case DecodedDateTime:
+		summary.DateTime++
+	case DecodedExternal:
+		summary.External++
+	}
 }
 
 // InferAttachmentFilename normalizes an attachment filename using the current
@@ -334,6 +521,189 @@ func SummarizeAttachmentPayload(currentName string, payload []byte, fallback str
 	}
 }
 
+// ReadDocuments decodes rows from the Document table into stable semantic
+// article records.
+func (db *Database) ReadDocuments(limit, offset int) ([]ArticleRecord, error) {
+	rows, err := db.ReadDecodedRows("Document", limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return ParseArticleRows("Document", rows), nil
+}
+
+// ReadDiaries decodes rows from the Diary table into stable semantic article
+// records.
+func (db *Database) ReadDiaries(limit, offset int) ([]ArticleRecord, error) {
+	rows, err := db.ReadDecodedRows("Diary", limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return ParseArticleRows("Diary", rows), nil
+}
+
+// ReadArticles decodes Diary and Document rows into one article list.
+func (db *Database) ReadArticles() ([]ArticleRecord, error) {
+	out := make([]ArticleRecord, 0, 128)
+	if rows, err := db.ReadDiaries(0, 0); err == nil {
+		out = append(out, rows...)
+	} else if !errors.Is(err, ErrTableNotFound) && !errors.Is(err, ErrRecordLayoutUnavailable) {
+		return nil, err
+	}
+	if rows, err := db.ReadDocuments(0, 0); err == nil {
+		out = append(out, rows...)
+	} else if !errors.Is(err, ErrTableNotFound) && !errors.Is(err, ErrRecordLayoutUnavailable) {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ParseArticleRows converts decoded Document or Diary rows into semantic
+// article records while keeping the original decoded values available.
+func ParseArticleRows(tableName string, rows []DecodedRow) []ArticleRecord {
+	out := make([]ArticleRecord, 0, len(rows))
+	for _, row := range rows {
+		values := row.Values
+		record := ArticleRecord{
+			TableName:      tableName,
+			Sequence:       row.Sequence,
+			ID:             decodedString(values, "Id"),
+			ParentID:       decodedString(values, "ParentId"),
+			IsFolder:       decodedBool(values, "IsFolder"),
+			ArticleFormat:  decodedInt32(values, "ArticleFormat"),
+			IconID:         decodedInt32(values, "IconId"),
+			Title:          decodedString(values, "Title"),
+			Keywords:       decodedString(values, "Keywords"),
+			TagIDList:      decodedString(values, "TagIdList"),
+			Content:        decodedBytes(values, "Content"),
+			ContentText:    decodedString(values, "Content"),
+			Date:           decodedString(values, "Date"),
+			Time:           decodedString(values, "Time"),
+			WeatherIconID:  decodedString(values, "WeatherIconId"),
+			WeatherText:    decodedString(values, "WeatherText"),
+			ModifyDateTime: decodedString(values, "ModifyDateTime"),
+			CreateDateTime: decodedString(values, "CreateDateTime"),
+			WordCount:      decodedInt32(values, "WordCount"),
+			SortCode:       decodedInt32(values, "SortCode"),
+			Deleted:        decodedBool(values, "Deleted"),
+			Values:         values,
+		}
+		out = append(out, record)
+	}
+	return out
+}
+
+// ReadAttachments joins AttachMeta and AttachContent rows into attachment
+// records with decoded payload bytes and filename/content-type inference.
+func (db *Database) ReadAttachments(limit, offset int) ([]AttachmentRecord, error) {
+	metaRows, err := db.ReadDecodedRows("AttachMeta", limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	contentRows, err := db.ReadDecodedRows("AttachContent", 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAttachmentRows(metaRows, contentRows), nil
+}
+
+// ParseAttachmentRows joins decoded AttachMeta and AttachContent rows into
+// semantic attachment records.
+func ParseAttachmentRows(metaRows, contentRows []DecodedRow) []AttachmentRecord {
+	contentByID := make(map[string]DecodedRow, len(contentRows))
+	for _, row := range contentRows {
+		if id := decodedString(row.Values, "Id"); id != "" {
+			contentByID[id] = row
+		}
+	}
+
+	out := make([]AttachmentRecord, 0, len(metaRows))
+	for _, row := range metaRows {
+		metaValues := row.Values
+		record := AttachmentRecord{
+			Sequence:   row.Sequence,
+			ID:         decodedString(metaValues, "Id"),
+			ContentID:  decodedString(metaValues, "ContentId"),
+			OwnerID:    decodedString(metaValues, "OwnerId"),
+			Name:       decodedString(metaValues, "Name"),
+			Comment:    decodedString(metaValues, "Comment"),
+			MetaValues: metaValues,
+		}
+
+		if contentRow, ok := contentByID[record.ContentID]; ok {
+			record.ContentValues = contentRow.Values
+			record.Payload = decodedBytes(contentRow.Values, "Content")
+			record.PayloadText = decodedString(contentRow.Values, "Content")
+		}
+
+		fallback := record.ContentID
+		if fallback == "" {
+			fallback = record.ID
+		}
+		if fallback == "" {
+			fallback = fmt.Sprintf("attachment-%d.bin", record.Sequence)
+		} else if !strings.Contains(filepath.Base(fallback), ".") {
+			fallback += ".bin"
+		}
+		record.Info = InspectAttachmentPayload(record.Name, record.Payload, fallback)
+		out = append(out, record)
+	}
+	return out
+}
+
+// ReadDiaryTags decodes rows from the DiaryTag table into semantic tag records.
+func (db *Database) ReadDiaryTags(limit, offset int) ([]TagRecord, error) {
+	rows, err := db.ReadDecodedRows("DiaryTag", limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return ParseTagRows("DiaryTag", rows), nil
+}
+
+// ReadDocumentTags decodes rows from the DocumentTag table into semantic tag
+// records.
+func (db *Database) ReadDocumentTags(limit, offset int) ([]TagRecord, error) {
+	rows, err := db.ReadDecodedRows("DocumentTag", limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return ParseTagRows("DocumentTag", rows), nil
+}
+
+// ReadTags decodes DiaryTag and DocumentTag rows into one tag list.
+func (db *Database) ReadTags() ([]TagRecord, error) {
+	out := make([]TagRecord, 0, 16)
+	if rows, err := db.ReadDiaryTags(0, 0); err == nil {
+		out = append(out, rows...)
+	} else if !errors.Is(err, ErrTableNotFound) && !errors.Is(err, ErrRecordLayoutUnavailable) {
+		return nil, err
+	}
+	if rows, err := db.ReadDocumentTags(0, 0); err == nil {
+		out = append(out, rows...)
+	} else if !errors.Is(err, ErrTableNotFound) && !errors.Is(err, ErrRecordLayoutUnavailable) {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ParseTagRows converts decoded DiaryTag or DocumentTag rows into semantic tag
+// records.
+func ParseTagRows(tableName string, rows []DecodedRow) []TagRecord {
+	out := make([]TagRecord, 0, len(rows))
+	for _, row := range rows {
+		values := row.Values
+		out = append(out, TagRecord{
+			TableName:    tableName,
+			Sequence:     row.Sequence,
+			ID:           decodedString(values, "Id"),
+			Name:         decodedString(values, "TagName"),
+			SortCode:     decodedInt32(values, "SortCode"),
+			IsPreCreated: decodedBool(values, "IsPreCreated"),
+			Values:       values,
+		})
+	}
+	return out
+}
+
 // ReadSyncRecords decodes rows from the Sync table into stable semantic records.
 func (db *Database) ReadSyncRecords(limit, offset int) ([]SyncRecord, error) {
 	rows, err := db.ReadDecodedRows("Sync", limit, offset)
@@ -384,6 +754,43 @@ func ParseSyncRecord(values map[string]DecodedValue) (SyncRecord, error) {
 	record.Deleted = deleted.Bool
 
 	return record, nil
+}
+
+func decodedString(values map[string]DecodedValue, name string) string {
+	value, ok := values[name]
+	if !ok {
+		return ""
+	}
+	if value.String != "" {
+		return value.String
+	}
+	if value.Kind == DecodedString && len(value.Bytes) > 0 {
+		return string(value.Bytes)
+	}
+	return ""
+}
+
+func decodedBytes(values map[string]DecodedValue, name string) []byte {
+	value, ok := values[name]
+	if !ok || len(value.Bytes) == 0 {
+		return nil
+	}
+	out := make([]byte, len(value.Bytes))
+	copy(out, value.Bytes)
+	return out
+}
+
+func decodedBool(values map[string]DecodedValue, name string) bool {
+	value, ok := values[name]
+	return ok && value.Kind == DecodedBool && value.Bool
+}
+
+func decodedInt32(values map[string]DecodedValue, name string) int32 {
+	value, ok := values[name]
+	if !ok || value.Kind != DecodedInt32 {
+		return 0
+	}
+	return value.Int32
 }
 
 func convertTable(table *irisdb.Table) Table {

@@ -6,6 +6,8 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,6 +23,11 @@ type Driver struct{}
 
 type conn struct {
 	db *edf.Database
+}
+
+type dataSourceName struct {
+	path     string
+	password []byte
 }
 
 type resultSet struct {
@@ -43,11 +50,76 @@ var selectPattern = regexp.MustCompile(
 )
 
 func (d *Driver) Open(name string) (driver.Conn, error) {
-	db, err := edf.Open(name)
+	source, err := parseDataSourceName(name)
+	if err != nil {
+		return nil, fmt.Errorf("parse edfsql data source: %w", err)
+	}
+
+	var db *edf.Database
+	if len(source.password) > 0 {
+		db, err = edf.OpenWithPassword(source.path, source.password)
+	} else {
+		db, err = edf.Open(source.path)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open edfsql connection: %w", err)
 	}
 	return &conn{db: db}, nil
+}
+
+func parseDataSourceName(name string) (dataSourceName, error) {
+	path, rawQuery, hasQuery := strings.Cut(name, "?")
+	source := dataSourceName{path: path}
+	if !hasQuery {
+		return source, nil
+	}
+
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return dataSourceName{}, fmt.Errorf("parse query options: %w", err)
+	}
+
+	for key := range values {
+		switch key {
+		case "password", "password_file", "password_env":
+		default:
+			return dataSourceName{}, fmt.Errorf("unknown data source option %q", key)
+		}
+	}
+
+	if password := values.Get("password"); password != "" {
+		source.password = []byte(password)
+		return source, nil
+	}
+	if path := values.Get("password_file"); path != "" {
+		password, err := readPasswordFile(path)
+		if err != nil {
+			return dataSourceName{}, err
+		}
+		source.password = password
+		return source, nil
+	}
+	if envName := values.Get("password_env"); envName != "" {
+		password := strings.TrimSpace(os.Getenv(envName))
+		if password == "" {
+			return dataSourceName{}, fmt.Errorf("password_env %q is empty or unset", envName)
+		}
+		source.password = []byte(password)
+	}
+
+	return source, nil
+}
+
+func readPasswordFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read password_file: %w", err)
+	}
+	password := strings.TrimSpace(string(data))
+	if password == "" {
+		return nil, fmt.Errorf("password_file is empty")
+	}
+	return []byte(password), nil
 }
 
 func (c *conn) Prepare(string) (driver.Stmt, error) {
@@ -73,6 +145,8 @@ func (c *conn) QueryContext(_ context.Context, query string, args []driver.Named
 	}
 
 	switch parsed.table {
+	case "__database":
+		return buildDatabaseResult(c.db, parsed), nil
 	case "__tables":
 		return buildTablesResult(c.db, parsed), nil
 	case "__columns":
@@ -164,6 +238,31 @@ func parseOptionalInt(raw string) (int, error) {
 		return 0, fmt.Errorf("parse integer %q: %w", raw, err)
 	}
 	return value, nil
+}
+
+func buildDatabaseResult(db *edf.Database, parsed parsedQuery) *resultSet {
+	allColumns := []string{"table_count", "queryable_table_count", "password_supplied", "password_verified"}
+	columns, indexes := projectColumns(parsed.columns, allColumns)
+
+	tables := db.Tables()
+	queryable := 0
+	for _, table := range tables {
+		if table.Queryable {
+			queryable++
+		}
+	}
+
+	row := []driver.Value{
+		int64(len(tables)),
+		int64(queryable),
+		db.PasswordSupplied(),
+		db.PasswordVerified(),
+	}
+	return &resultSet{
+		columns: columns,
+		dbTypes: projectTypes([]string{"INTEGER", "INTEGER", "BOOLEAN", "BOOLEAN"}, indexes),
+		rows:    sliceRows([][]driver.Value{projectRow(row, indexes)}, parsed.limit, parsed.offset),
+	}
 }
 
 func buildTablesResult(db *edf.Database, parsed parsedQuery) *resultSet {
@@ -306,25 +405,21 @@ func buildTableResult(db *edf.Database, parsed parsedQuery) (driver.Rows, error)
 	}
 	columns, indexes := projectColumns(parsed.columns, allColumns)
 
-	rawRows, err := db.ReadRawRows(table.Name, parsed.limit, parsed.offset)
+	decodedRows, err := db.ReadDecodedRows(table.Name, parsed.limit, parsed.offset)
 	if err != nil {
 		return nil, err
 	}
 
-	rows := make([][]driver.Value, 0, len(rawRows))
-	for _, raw := range rawRows {
+	rows := make([][]driver.Value, 0, len(decodedRows))
+	for _, decoded := range decodedRows {
 		row := make([]driver.Value, 0, len(table.Fields))
-		for idx, value := range raw.Values {
-			if !table.Decodable {
-				row = append(row, value)
+		for _, field := range table.Fields {
+			value, ok := decoded.Values[field.Name]
+			if !ok {
+				row = append(row, nil)
 				continue
 			}
-			decoded, err := db.DecodeValue(table.Name, table.Fields[idx].Name, value)
-			if err != nil {
-				row = append(row, value)
-				continue
-			}
-			row = append(row, driverValue(decoded))
+			row = append(row, driverValue(value))
 		}
 		rows = append(rows, projectRow(row, indexes))
 	}
@@ -341,11 +436,11 @@ func buildTableResult(db *edf.Database, parsed parsedQuery) (driver.Rows, error)
 				switch field.TypeCode {
 				case 0x0005:
 					fieldType = "BOOLEAN"
-				case 0x0003:
+				case 0x0003, 0x0019:
 					fieldType = "INTEGER"
 				case 0x0009, 0x000a, 0x000b:
 					fieldType = "TEXT"
-				case 0x2001, 0x2201, 0x4018, 0x8018:
+				case 0x1e18, 0x2001, 0x2201, 0x4018, 0x8018:
 					fieldType = "TEXT"
 				case 0x000f, 0x0010, 0x0027:
 					fieldType = "BLOB"
@@ -371,6 +466,8 @@ func driverValue(decoded edf.DecodedValue) driver.Value {
 		return decoded.Bool
 	case edf.DecodedInt32:
 		return int64(decoded.Int32)
+	case edf.DecodedInt64:
+		return decoded.Int64
 	case edf.DecodedDate, edf.DecodedTime, edf.DecodedDateTime:
 		return decoded.String
 	case edf.DecodedString:

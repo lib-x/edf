@@ -2,6 +2,7 @@ package irisdb
 
 import (
 	"bytes"
+	"crypto/cipher"
 	"fmt"
 	"math"
 	"os"
@@ -38,10 +39,14 @@ var (
 )
 
 type File struct {
-	path   string
-	data   []byte
-	tables []*Table
-	byName map[string]*Table
+	path        string
+	data        []byte
+	password    []byte
+	cipher      cipher.Block
+	hasPassword bool
+	verified    bool
+	tables      []*Table
+	byName      map[string]*Table
 }
 
 type Table struct {
@@ -81,13 +86,23 @@ type RawRow struct {
 	Values   [][]byte
 }
 
+type DecodedRow struct {
+	Sequence int
+	Bitmap   []byte
+	Values   map[string]DecodedValue
+}
+
 func Open(path string) (*File, error) {
+	return OpenWithPassword(path, nil)
+}
+
+func OpenWithPassword(path string, password []byte) (*File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	file, err := openBytes(path, data)
+	file, err := openBytes(path, data, password)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -95,7 +110,7 @@ func Open(path string) (*File, error) {
 	return file, nil
 }
 
-func openBytes(path string, data []byte) (*File, error) {
+func openBytes(path string, data []byte, password []byte) (*File, error) {
 	if len(data) < 8 {
 		return nil, ErrShortRead
 	}
@@ -108,10 +123,19 @@ func openBytes(path string, data []byte) (*File, error) {
 		return nil, err
 	}
 
+	block, err := newBlowfishCipher(password)
+	if err != nil {
+		return nil, err
+	}
+
 	file := &File{
-		path:   path,
-		data:   data,
-		byName: make(map[string]*Table, len(tableOffsets)),
+		path:        path,
+		data:        data,
+		password:    slicesCloneBytes(password),
+		cipher:      block,
+		hasPassword: len(password) > 0,
+		verified:    verifyPasswordBlock(data, block),
+		byName:      make(map[string]*Table, len(tableOffsets)),
 	}
 
 	for _, tableOffset := range tableOffsets {
@@ -128,6 +152,14 @@ func openBytes(path string, data []byte) (*File, error) {
 
 func (f *File) Path() string {
 	return f.path
+}
+
+func (f *File) PasswordVerified() bool {
+	return f.verified
+}
+
+func (f *File) PasswordSupplied() bool {
+	return f.hasPassword
 }
 
 func (f *File) Tables() []*Table {
@@ -180,6 +212,103 @@ func (f *File) ReadRawRows(tableName string, limit, offset int) ([]RawRow, error
 	}
 
 	return rows, nil
+}
+
+func (f *File) ReadDecodedRows(tableName string, limit, offset int) ([]DecodedRow, error) {
+	table, ok := f.Table(tableName)
+	if !ok {
+		return nil, ErrTableNotFound
+	}
+	if table.Layout == nil {
+		return nil, ErrRecordLayoutUnavailable
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	if offset >= table.Layout.RecordCount {
+		return []DecodedRow{}, nil
+	}
+
+	end := table.Layout.RecordCount
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+
+	rows := make([]DecodedRow, 0, end-offset)
+	for idx := offset; idx < end; idx++ {
+		recordOffset := int(table.Layout.RecordRoot) + idx*table.Layout.Stride
+		recordEnd := recordOffset + table.Layout.Stride
+		if recordEnd > len(f.data) {
+			return nil, ErrShortRead
+		}
+
+		row, err := f.decodeRecord(table, f.data[recordOffset:recordEnd])
+		if err != nil {
+			return nil, fmt.Errorf("decode row %d in %s: %w", idx, table.Name, err)
+		}
+		rows = append(rows, row)
+	}
+
+	return rows, nil
+}
+
+func (f *File) decodeRecord(table *Table, record []byte) (DecodedRow, error) {
+	raw, err := decodeRawRow(record, table.Fields, table.Layout.BitmapSize)
+	if err != nil {
+		return DecodedRow{}, err
+	}
+
+	values := make(map[string]DecodedValue, len(table.Fields))
+	var decryptedPayload []byte
+	payloadOffset := 6 + table.Layout.BitmapSize
+	if f.cipher != nil && len(record) >= payloadOffset {
+		decryptedPayload = decryptTinyDBEMCTSWithBlock(record[payloadOffset:], f.cipher)
+	}
+
+	for idx, field := range table.Fields {
+		decoded, err := f.decodeFieldValue(field, raw.Values[idx], decryptedPayload, payloadOffset)
+		if err != nil {
+			return DecodedRow{}, err
+		}
+		values[field.Name] = decoded
+	}
+
+	return DecodedRow{
+		Sequence: raw.Sequence,
+		Bitmap:   raw.Bitmap,
+		Values:   values,
+	}, nil
+}
+
+func (f *File) decodeFieldValue(field Field, raw []byte, decryptedPayload []byte, payloadOffset int) (DecodedValue, error) {
+	if len(decryptedPayload) > 0 && shouldTryDecryptedField(field.TypeCode) {
+		start := field.SlotOffset - payloadOffset
+		end := start + field.RawWidth
+		if start >= 0 && end <= len(decryptedPayload) {
+			decoded, err := decodeRawValueWithPassword(f.data, field, decryptedPayload[start:end], f.password)
+			if err != nil {
+				return DecodedValue{}, err
+			}
+			if decoded.Kind != DecodedRaw {
+				return decoded, nil
+			}
+		}
+	}
+	if f.cipher != nil && shouldTryDecryptedField(field.TypeCode) {
+		decryptedField := decryptTinyDBEMCTSWithBlock(raw, f.cipher)
+		decoded, err := decodeRawValueWithPassword(f.data, field, decryptedField, f.password)
+		if err != nil {
+			return DecodedValue{}, err
+		}
+		if decoded.Kind != DecodedRaw {
+			return decoded, nil
+		}
+	}
+
+	return decodeRawValueWithPassword(f.data, field, raw, f.password)
 }
 
 func decodeRawRow(record []byte, fields []Field, bitmapSize int) (RawRow, error) {
@@ -275,7 +404,7 @@ func parseTable(data []byte, tableOffset int64) (*Table, error) {
 		Indexes:      indexes,
 	}
 	table.Layout = detectLayout(data, table)
-	table.Decodable = detectDecodable(data, table)
+	table.Decodable = detectDecodable(table)
 
 	return table, nil
 }
@@ -355,41 +484,18 @@ func detectLayout(data []byte, table *Table) *RecordLayout {
 	return nil
 }
 
-func detectDecodable(data []byte, table *Table) bool {
+func detectDecodable(table *Table) bool {
 	if table.Layout == nil || table.RecordCount == 0 {
 		return false
 	}
 
-	recordOffset := int(table.Layout.RecordRoot)
-	recordEnd := recordOffset + table.Layout.Stride
-	if recordEnd > len(data) {
-		return false
-	}
-
-	row, err := decodeRawRow(data[recordOffset:recordEnd], table.Fields, table.Layout.BitmapSize)
-	if err != nil {
-		return false
-	}
-
-	decodedStrong := 0
-	for idx, field := range table.Fields {
-		decoded, err := decodeRawValue(data, field, row.Values[idx])
-		if err != nil {
-			continue
-		}
-		switch decoded.Kind {
-		case DecodedString:
-			if decoded.String != "" {
-				decodedStrong++
-			}
-		case DecodedExternal:
-			if decoded.String != "" || len(decoded.Bytes) > 0 {
-				decodedStrong++
-			}
+	for _, field := range table.Fields {
+		if canDecodeFieldType(field.TypeCode) {
+			return true
 		}
 	}
 
-	return decodedStrong >= 2
+	return false
 }
 
 func candidateStrides(blob []byte) []int {
