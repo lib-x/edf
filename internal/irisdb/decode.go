@@ -535,24 +535,58 @@ func decodeUTF16BlobText(blob []byte) string {
 }
 
 func decodeSDPText(blob []byte) string {
-	if len(blob) < 32 || !bytes.HasPrefix(blob, []byte("SDP\x00")) {
+	if len(blob) < 12 || !bytes.HasPrefix(blob, []byte("SDP\x00")) {
 		return ""
 	}
-	if binary.BigEndian.Uint32(blob[4:8]) != 1 || binary.BigEndian.Uint32(blob[8:12]) != 1 {
+	if binary.BigEndian.Uint32(blob[4:8]) != 1 {
 		return ""
 	}
-	if binary.BigEndian.Uint32(blob[12:16]) != 4 || string(blob[16:20]) != "Text" || binary.BigEndian.Uint32(blob[20:24]) != 0 {
+	itemCount := binary.BigEndian.Uint32(blob[8:12])
+	if uint64(itemCount) > uint64((len(blob)-12)/16) {
 		return ""
 	}
-	textSize := binary.BigEndian.Uint32(blob[28:32])
-	if binary.BigEndian.Uint32(blob[24:28]) != textSize || uint64(textSize) > uint64(len(blob)-32) {
-		return ""
+	position := 12
+	text := ""
+	foundText := false
+	for range itemCount {
+		kind, ok := readSDPBytes(blob, &position)
+		if !ok {
+			return ""
+		}
+		name, ok := readSDPBytes(blob, &position)
+		if !ok || len(blob)-position < 4 {
+			return ""
+		}
+		declaredSize := binary.BigEndian.Uint32(blob[position : position+4])
+		position += 4
+		payload, ok := readSDPBytes(blob, &position)
+		if !ok || uint64(declaredSize) != uint64(len(payload)) {
+			return ""
+		}
+		if string(kind) == "Text" && len(name) == 0 {
+			if foundText || !utf8MostlyReadable(payload) {
+				return ""
+			}
+			text = string(payload)
+			foundText = true
+		}
 	}
-	body := blob[32 : 32+int(textSize)]
-	if !utf8MostlyReadable(body) {
-		return ""
+	return text
+}
+
+func readSDPBytes(blob []byte, position *int) ([]byte, bool) {
+	if len(blob)-*position < 4 {
+		return nil, false
 	}
-	return string(body)
+	size := binary.BigEndian.Uint32(blob[*position : *position+4])
+	*position += 4
+	if uint64(size) > uint64(len(blob)-*position) {
+		return nil, false
+	}
+	end := *position + int(size)
+	value := blob[*position:end]
+	*position = end
+	return value, true
 }
 
 func decodeRVFText(blob []byte) string {

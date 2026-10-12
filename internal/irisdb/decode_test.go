@@ -99,11 +99,14 @@ func TestDecodeSDPTextUsesDeclaredLength(t *testing.T) {
 		mutate func([]byte)
 	}{
 		{name: "unsupported version", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[4:8], 2) }},
-		{name: "multiple entries", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[8:12], 2) }},
-		{name: "wrong name length", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[12:16], 3) }},
-		{name: "wrong entry name", mutate: func(blob []byte) { copy(blob[16:20], "Data") }},
-		{name: "unsupported entry type", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[20:24], 1) }},
+		{name: "missing declared entry", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[8:12], 2) }},
+		{name: "wrong type length", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[12:16], 3) }},
+		{name: "non-text entry", mutate: func(blob []byte) { copy(blob[16:20], "Data") }},
+		{name: "malformed item name", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[20:24], 1) }},
 		{name: "mismatched lengths", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[24:28], 1) }},
+		{name: "oversized type", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[12:16], ^uint32(0)) }},
+		{name: "oversized name", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[20:24], ^uint32(0)) }},
+		{name: "oversized payload", mutate: func(blob []byte) { binary.BigEndian.PutUint32(blob[28:32], ^uint32(0)) }},
 		{name: "truncated data", mutate: func(blob []byte) {
 			binary.BigEndian.PutUint32(blob[24:28], uint32(len(blob)))
 			binary.BigEndian.PutUint32(blob[28:32], uint32(len(blob)))
@@ -118,6 +121,47 @@ func TestDecodeSDPTextUsesDeclaredLength(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDecodeSDPTextWithMultipleItems(t *testing.T) {
+	text := "**Synthetic markdown 正文**\r\n"
+	textItem := sdpItemForTest("Text", "", []byte(text))
+	imageItem := sdpItemForTest("Image", "synthetic-image", []byte{0, 1, 2, 3})
+	tests := []struct {
+		name  string
+		count uint32
+		items []byte
+		want  string
+	}{
+		{"text_first", 2, append(bytes.Clone(textItem), imageItem...), text},
+		{"text_last", 2, append(bytes.Clone(imageItem), textItem...), text},
+		{"named_text_is_not_body", 1, sdpItemForTest("Text", "metadata", []byte(text)), ""},
+		{"empty_pack", 0, nil, ""},
+		{"excessive_count", ^uint32(0), textItem, ""},
+		{"missing_item", 2, textItem, ""},
+		{"truncated_following_item", 2, append(bytes.Clone(textItem), imageItem[:len(imageItem)-1]...), ""},
+		{"duplicate_body", 2, append(bytes.Clone(textItem), textItem...), ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pack := append([]byte("SDP\x00"), binary.BigEndian.AppendUint32(nil, 1)...)
+			pack = binary.BigEndian.AppendUint32(pack, test.count)
+			pack = append(pack, test.items...)
+			if got := decodeExternalText(pack); got != test.want {
+				t.Fatalf("decodeExternalText() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func sdpItemForTest(kind, name string, payload []byte) []byte {
+	item := binary.BigEndian.AppendUint32(nil, uint32(len(kind)))
+	item = append(item, kind...)
+	item = binary.BigEndian.AppendUint32(item, uint32(len(name)))
+	item = append(item, name...)
+	item = binary.BigEndian.AppendUint32(item, uint32(len(payload)))
+	item = binary.BigEndian.AppendUint32(item, uint32(len(payload)))
+	return append(item, payload...)
 }
 
 func TestDecodeRawValueKeepsValidUnknownBlobReferenceMetadata(t *testing.T) {

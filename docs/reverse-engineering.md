@@ -157,6 +157,9 @@ examined artifact. No client process was launched for this analysis.
 | `0xd04f90`, typed fields copied from the record buffer | `ev_445e722748900594649acd9cf32329d0b332d79fccf89d4c15184a7a24ba55a2` |
 | `0xcff7c0`, database password comparison | `ev_a5d44efad89016e9deb929fff586cfaae045beff683beffa0fe3e9b5a718292d` |
 | `0xcee610`, password byte conversion and hash dispatch | `ev_c4245f854bc5a98e9b34e012f29f30c6302b534c5c6a09976efff02159174c64` |
+| `0xe71da0`, SDP header reader | `ev_b4dc4a1608cd28ca09c2435e017e5dd926d8703d239f75e2ac1468ed8e43efb6` |
+| `0xe6f530`, SDP item-count iteration | `ev_06f10a2abdc694898d1700403a2b41bc8de290b699d829184455ac144fed7a94` |
+| `0xe71ef0`, SDP item reader | `ev_f73ea959fd58e0f7458e6ee14c51e7143f649e63b6f72d2f81cd79de4a675ca8` |
 
 The native record reader decrypts the entire field payload after the record
 prefix and null bitmap. It does not limit decryption to strings or blob
@@ -166,6 +169,14 @@ boolean, date, time, and datetime values to be decoded from ciphertext. Every
 field now uses its slice of the same decrypted payload. Zero dates/datetimes and
 unknown field types retain their decrypted raw bytes rather than falling back
 to ciphertext or a speculative per-field transform.
+
+The SDP header's big-endian integer at byte 4 is version 1; the integer at
+byte 8 is the item count, not a second version marker. Each item stores a
+length-prefixed type string, a length-prefixed name, a declared payload size,
+and a length-prefixed payload. The parser now walks every declared item and
+extracts the unnamed `Text` body regardless of its position, skipping unrelated
+items. It rejects excessive counts, truncated items, inconsistent sizes, and
+duplicate bodies instead of returning text from a partially validated package.
 
 The traced Linux database password path still uses Base64 SHA-0. Its separate
 application-level SHA-1 helper has not been established as a database-password
@@ -187,6 +198,8 @@ standard/safe key selection, wrong passwords, and encrypted row/blob recovery.
 Whole-row decryption regressions additionally cover both data-key modes and
 integer, boolean, date, time, datetime, zero-valued, and unknown fields at a
 non-block-aligned field offset.
+SDP regressions cover body ordering among multiple items, named metadata,
+duplicate bodies, incomplete subsequent items, and oversized length/count fields.
 
 ```sh
 go test ./...
@@ -207,15 +220,16 @@ supplied for these public samples.
   engineering or proof of every client version's encryption behavior.
 - RVF text extraction remains heuristic and does not reconstruct full rich-text
   layout, embedded objects, or every control record.
-- Only the observed SDP v1 single-Text variant is recognized; other versions,
-  multiple entries, and compressed entry variants remain unsupported.
+- SDP version 1 packages support an unnamed Text body among multiple entries.
+  Other versions and compressed entry variants remain unsupported; non-text
+  entries are skipped, not reconstructed.
 - Multi-tag serialization, record-page traversal beyond existing layout
   heuristics, unpopulated schemas, and arbitrary fixed-field widths need further
   evidence. The official samples do not prove those paths correct.
 - Anonymous local checks recognize 11 encrypted Blowfish databases: eight in
   standard mode and three in safe mode. Standard-mode text/payload decoding
   recovers article content in eight files: 1,044 articles have content bytes,
-  866 have extracted content text, and 488 attachments have recovered payloads.
+  867 have extracted content text, and 488 attachments have recovered payloads.
   These counts describe recovery signals, not exhaustive fidelity checks.
   The supplied password did not match any of
   the CRC-checked password-lock digests, so safe-mode content recovery remains
