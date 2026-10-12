@@ -123,7 +123,11 @@ func openBytes(path string, data []byte, password []byte) (*File, error) {
 		return nil, err
 	}
 
-	block, err := newBlowfishCipher(password)
+	key, verified, err := resolveEncryption(data, password)
+	if err != nil {
+		return nil, err
+	}
+	block, err := newBlowfishCipher(key)
 	if err != nil {
 		return nil, err
 	}
@@ -131,10 +135,10 @@ func openBytes(path string, data []byte, password []byte) (*File, error) {
 	file := &File{
 		path:        path,
 		data:        data,
-		password:    slicesCloneBytes(password),
+		password:    key,
 		cipher:      block,
 		hasPassword: len(password) > 0,
-		verified:    verifyPasswordBlock(data, block),
+		verified:    verified,
 		byName:      make(map[string]*Table, len(tableOffsets)),
 	}
 

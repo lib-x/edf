@@ -126,7 +126,7 @@ func TestLocalEDFSamplesWithPasswordDoNotRegressDecodedSignals(t *testing.T) {
 	}
 
 	if verifiedFiles == 0 {
-		t.Skip("supplied password did not verify any local EDF sample; decoded recovery assertions skipped")
+		t.Fatal("supplied password did not authenticate any local EDF sample")
 	}
 	if withPassword < withoutPassword {
 		t.Fatalf("decoded signal count with password = %d, without password = %d; want no regression", withPassword, withoutPassword)
@@ -571,7 +571,7 @@ func TestLocalSemanticReadersWithPasswordDoNotRegressSignals(t *testing.T) {
 	}
 
 	if verifiedFiles == 0 {
-		t.Skip("supplied password did not verify any local EDF sample; semantic recovery assertions skipped")
+		t.Fatal("supplied password did not authenticate any local EDF sample")
 	}
 	if withPassword < withoutPassword {
 		t.Fatalf("semantic signal count with password = %d, without password = %d; want no regression", withPassword, withoutPassword)

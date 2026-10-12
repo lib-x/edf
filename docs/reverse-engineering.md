@@ -96,12 +96,63 @@ uses its declared length rather than treating all bytes after offset 32 as text.
 Truncated data, mismatched lengths, unsupported versions/types, and multiple
 entries produce no speculative text; the decoded binary payload stays available.
 
+### Native encryption investigation
+
+REA 6.4.0 with Ghidra 12.1.4 completed native analysis of the Windows executable
+identified above. Focused decompilation established these additional observations:
+
+| Address / operation | Evidence ID |
+| --- | --- |
+| `0xa2954c`, encryption configuration | `ev_78c329d87d1ab85ffde12bf2047a1406d5f1cbc346488e00223426d5bee64d21` |
+| `0x9f14b0`, tail decoding | `ev_c43effbd17cc8069ad859af031d59bc80bdd87ecf79562ca7de2c856202a6678` |
+| `0xa29244`, password comparison | `ev_61588bdbcdf967e316d46c208e2f9357bf78c7233d667db06d9052839d56ec7f` |
+| `0xa27fb4`, file-info decoding | `ev_2ae71c467c3f166692f796e9e0d26286630e8691710ca9596d55b2a8c7191f8a` |
+| `0x9eacc0`, password-lock layout | `ev_728f038ade14214ebec103981dd3d987c697acf32f617a1dd096c38b4e1b3d46` |
+| `0x9ed858`, digest formatting | `ev_2fb0225dfb8a7b6f32b2fa1ae7bc3075406a851fec1d9041d669ff42d952a4a1` |
+| `0x9ef1e0`, SHA compression | `ev_94a71a56ec631aa81a03ff70bed736105a09767369c452eecb9f227000791743` |
+
+Function-entry/name seeds were supplied before auto-analysis; those names are
+investigator assertions. The cited code bodies, not the seed names, support the
+format conclusions. Delphi exception handling and register calling conventions
+limit pseudocode accuracy; focused byte inspection corroborated field offsets.
+
+- File info starts at `0x907`, with 109 serialized bytes. Password lock starts at
+  `0x974`, with 360 serialized bytes. Both use independent empty-key Blowfish
+  EMCTS transforms. An all-zero eight-byte Blowfish key produces the same key
+  schedule. Both contain a little-endian IEEE CRC-32 of the remaining bytes;
+  metadata is used only after that checksum matches.
+- File info byte 38 enables encryption, its ShortString at byte 39 names the
+  algorithm, and byte 72 selects safe encryption. Standard mode uses the literal
+  `!@#$%^&*()` as its data key; safe mode uses the database password. The same
+  resolved key must reach both fixed-row and external-blob decoding.
+- Password authentication compares a formatted hash, not a zero-filled region
+  at `0x80c`. That region can store an original-password ShortString and is not
+  a reliable all-zero password validator. The supported password-lock digest is
+  a 28-byte Base64 SHA-0 value at bytes 6 through 33. The official public sample's
+  digest matches SHA-0 of the empty string; known-answer vectors independently
+  distinguish SHA-0 from SHA-1. This is legacy format compatibility, not a
+  recommendation to use SHA-0 for new authentication.
+- EMCTS initializes feedback with `E_K(ff...ff)`. Full-block plaintext is
+  `D_K(ciphertext) XOR feedback`, followed by `feedback XOR ciphertext`.
+  Each remaining byte requires a new block encryption of feedback, consumes
+  stream byte zero, shifts feedback by one byte, and XORs the ciphertext byte
+  into the retained final feedback byte. Reusing a single stream block for all
+  tail bytes was incorrect.
+
+Standard-mode decoding does not authenticate a supplied password. Safe-mode
+decoding is withheld unless authentication succeeds. Unsupported or corrupt
+metadata does not enable speculative raw-password decryption. Automatic Windows
+ANSI code-page conversion for non-ASCII passwords remains unsupported.
+
 ## Verification
 
 Regression tests use generated compressed payloads rather than copied diary
 files. They cover ASCII tag IDs, ASCII configuration, UTF-8 memo text, short
 Chinese wide memos, UTF-16 bytes that resemble ASCII, odd-length wide memos,
 SDP length boundaries, unsupported SDP headers, and article metadata mapping.
+Encryption tests additionally cover independent PyCryptodome ECB-based reference
+vectors for every tail size, SHA-0 known answers, CRC rejection, truncated headers,
+standard/safe key selection, wrong passwords, and encrypted row/blob recovery.
 
 ```sh
 go test ./...
@@ -117,10 +168,9 @@ supplied for these public samples.
 
 ## Remaining limits
 
-- Native decompilation was unavailable because no Ghidra or IDA provider was
-  configured. The client registration and MCP initialization/tool listing were
-  verified independently; this does not establish an active connection in an
-  already-running coding-agent session.
+- Native decompilation now works through REA and Ghidra. This remains a focused
+  investigation of the identified Windows build, not complete reverse
+  engineering or proof of every client version's encryption behavior.
 - RVF text extraction remains heuristic and does not reconstruct full rich-text
   layout, embedded objects, or every control record.
 - Only the observed SDP v1 single-Text variant is recognized; other versions,
@@ -128,8 +178,14 @@ supplied for these public samples.
 - Multi-tag serialization, record-page traversal beyond existing layout
   heuristics, unpopulated schemas, and arbitrary fixed-field widths need further
   evidence. The official samples do not prove those paths correct.
-- Existing encrypted-record support was exercised by the synthetic regression
-  suite. Opt-in tests against local private inputs did not authenticate a header,
-  so real encrypted-content recovery remains unverified; skipped password tests
-  are not counted as successful verification. Private input names, paths,
-  passwords, contents, and diagnostic output are not included in this repository.
+- Anonymous local checks recognize 11 encrypted Blowfish databases: eight in
+  standard mode and three in safe mode. Standard-mode text/payload decoding
+  recovers article content in eight files: 1,044 articles have content bytes,
+  866 have extracted content text, and 488 attachments have recovered payloads.
+  These counts describe recovery signals, not exhaustive fidelity checks.
+  The supplied password did not match any of
+  the CRC-checked password-lock digests, so safe-mode content recovery remains
+  unverified. Successful structural opening or readable signals are not proof
+  that every article or attachment is complete. Opt-in password tests now fail,
+  rather than skip, when no sample authenticates. Private input names, paths,
+  passwords, hashes, contents, and diagnostic output remain outside the repository.

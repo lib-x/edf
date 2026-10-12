@@ -134,7 +134,7 @@ func TestLocalSQLDriverWithPasswordFileDoesNotRegressReadableSignals(t *testing.
 		}
 	}
 	if verifiedFiles == 0 {
-		t.Skip("supplied password did not verify any local EDF sample; SQL recovery assertions skipped")
+		t.Fatal("supplied password did not authenticate any local EDF sample")
 	}
 	if withPassword < withoutPassword {
 		t.Fatalf("readable signal count with password = %d, without password = %d; want no regression", withPassword, withoutPassword)

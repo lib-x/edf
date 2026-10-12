@@ -24,8 +24,7 @@ if err != nil {
 }
 if !db.PasswordVerified() {
 	// The file still opens for structural exploration, but this password did
-	// not match the known EDF header validation block.
-	// Decrypted row/content recovery should not be considered reliable.
+	// not authenticate against the supported password-lock digest.
 }
 _ = db.PasswordSupplied()
 rows, err := db.ReadDecodedRows("Document", 0, 0)
@@ -42,6 +41,15 @@ summaries, err := db.DecodeSummaries()
 bytes remain available alongside best-effort text. Markdown text extraction
 recognizes the observed SDP v1 single-`Text` layout and respects its declared
 byte length; unsupported layouts retain their bytes without speculative text.
+
+Standard encryption uses the official client's fixed data key and can be decoded
+without a supplied password. This is not password authentication: always check
+`PasswordVerified()` separately. Safe encryption enables data decryption only
+after the supplied password matches the CRC-checked password-lock digest.
+Unrecognized or damaged headers remain available for structural exploration
+without speculative decryption; explicitly unsupported encryption configurations
+return an error. Password bytes must use the client's ANSI
+encoding; automatic conversion of non-ASCII passwords is not implemented.
 
 Passwords can also be read from a local text file:
 

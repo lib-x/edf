@@ -298,29 +298,6 @@ func TestReadDecodedRowsKeepsEncryptedPayloadRawWithWrongPassword(t *testing.T) 
 	}
 }
 
-func TestVerifyPasswordBlock(t *testing.T) {
-	password := []byte("secret")
-	data := make([]byte, passwordValidationOffset+passwordValidationLength)
-	encrypted := encryptTinyDBEMCTSForTest(t, make([]byte, passwordValidationLength), password)
-	copy(data[passwordValidationOffset:], encrypted)
-
-	block, err := newBlowfishCipher(password)
-	if err != nil {
-		t.Fatalf("newBlowfishCipher() error = %v", err)
-	}
-	if !verifyPasswordBlock(data, block) {
-		t.Fatalf("verifyPasswordBlock() = false, want true")
-	}
-
-	wrongBlock, err := newBlowfishCipher([]byte("wrong-secret"))
-	if err != nil {
-		t.Fatalf("newBlowfishCipher(wrong) error = %v", err)
-	}
-	if verifyPasswordBlock(data, wrongBlock) {
-		t.Fatalf("verifyPasswordBlock() with wrong password = true, want false")
-	}
-}
-
 func makeBlobRefRaw(dataOffset, plainSize, storedSize, areaSize uint32) []byte {
 	raw := make([]byte, 24)
 	binary.LittleEndian.PutUint32(raw[0:4], dataOffset)
@@ -421,9 +398,11 @@ func encryptTinyDBEMCTSForTest(t *testing.T, data []byte, key []byte) []byte {
 
 	if remain > 0 {
 		stream := make([]byte, cipherBlockSize)
-		block.Encrypt(stream, f)
 		for idx := range remain {
-			out[pos+idx] ^= stream[idx]
+			block.Encrypt(stream, f)
+			out[pos+idx] ^= stream[0]
+			copy(f, f[1:])
+			f[cipherBlockSize-1] ^= out[pos+idx]
 		}
 	}
 

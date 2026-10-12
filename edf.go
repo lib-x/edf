@@ -191,7 +191,8 @@ func Open(path string) (*Database, error) {
 }
 
 // OpenWithPassword opens an `.edf` file and enables password-based decoding for
-// encrypted row payloads. The password is used exactly as supplied.
+// encrypted row payloads. The password bytes are used exactly as supplied;
+// standard encryption uses the client's fixed data key independently.
 func OpenWithPassword(path string, password []byte) (*Database, error) {
 	file, err := irisdb.OpenWithPassword(path, password)
 	if err != nil {
@@ -221,8 +222,8 @@ func (db *Database) Path() string {
 }
 
 // PasswordVerified reports whether the supplied password matches the known EDF
-// header validation block. A false result means either no password was supplied,
-// the password did not match, or the file uses an unsupported validation variant.
+// password-lock digest. A false result means either no password was supplied,
+// the password did not match, or the file uses unsupported or damaged metadata.
 func (db *Database) PasswordVerified() bool {
 	return db.file.PasswordVerified()
 }
