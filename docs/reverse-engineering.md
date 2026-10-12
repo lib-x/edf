@@ -144,6 +144,37 @@ decoding is withheld unless authentication succeeds. Unsupported or corrupt
 metadata does not enable speculative raw-password decryption. Automatic Windows
 ANSI code-page conversion for non-ASCII passwords remains unsupported.
 
+## Linux native follow-up (2026-10-12)
+
+REA 6.4.0 and Ghidra 12.1.4 also completed focused static analysis of the Linux
+executable identified above. The supplied Debian package matches the previously
+examined artifact. No client process was launched for this analysis.
+
+| Address / operation | Evidence ID |
+| --- | --- |
+| `0xd419d0`, whole-record payload decryption | `ev_d64eb2057623e3c95fdb508562d4216a9ae4f21594a255b07246fdcb0d3cc120` |
+| `0xd3bcf0`, cipher decode dispatch | `ev_b9b29f549c651e739cb9c761c4f711ada1d4a486cb3e1679a034ac4c388d19ef` |
+| `0xd04f90`, typed fields copied from the record buffer | `ev_445e722748900594649acd9cf32329d0b332d79fccf89d4c15184a7a24ba55a2` |
+| `0xcff7c0`, database password comparison | `ev_a5d44efad89016e9deb929fff586cfaae045beff683beffa0fe3e9b5a718292d` |
+| `0xcee610`, password byte conversion and hash dispatch | `ev_c4245f854bc5a98e9b34e012f29f30c6302b534c5c6a09976efff02159174c64` |
+
+The native record reader decrypts the entire field payload after the record
+prefix and null bitmap. It does not limit decryption to strings or blob
+references, or restart cipher feedback at each field. The parser previously
+applied decrypted bytes only to those textual/reference types, leaving integer,
+boolean, date, time, and datetime values to be decoded from ciphertext. Every
+field now uses its slice of the same decrypted payload. Zero dates/datetimes and
+unknown field types retain their decrypted raw bytes rather than falling back
+to ciphertext or a speculative per-field transform.
+
+The traced Linux database password path still uses Base64 SHA-0. Its separate
+application-level SHA-1 helper has not been established as a database-password
+derivation step. Bounded offline execution of the native SHA-0 routines matched
+synthetic known answers; an anonymous local comparison also found no lock-digest
+matches for the supplied password bytes. This does not establish why an official
+client can open the same inputs. No heuristic password derivation or authentication
+bypass is included in the library.
+
 ## Verification
 
 Regression tests use generated compressed payloads rather than copied diary
@@ -153,6 +184,9 @@ SDP length boundaries, unsupported SDP headers, and article metadata mapping.
 Encryption tests additionally cover independent PyCryptodome ECB-based reference
 vectors for every tail size, SHA-0 known answers, CRC rejection, truncated headers,
 standard/safe key selection, wrong passwords, and encrypted row/blob recovery.
+Whole-row decryption regressions additionally cover both data-key modes and
+integer, boolean, date, time, datetime, zero-valued, and unknown fields at a
+non-block-aligned field offset.
 
 ```sh
 go test ./...
@@ -169,7 +203,7 @@ supplied for these public samples.
 ## Remaining limits
 
 - Native decompilation now works through REA and Ghidra. This remains a focused
-  investigation of the identified Windows build, not complete reverse
+  investigation of the identified Windows and Linux builds, not complete reverse
   engineering or proof of every client version's encryption behavior.
 - RVF text extraction remains heuristic and does not reconstruct full rich-text
   layout, embedded objects, or every control record.

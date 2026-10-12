@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"hash/crc32"
+	"math"
+	"reflect"
 	"testing"
 )
 
@@ -132,6 +134,61 @@ func TestResolvedKeyDecodesRowsAndBlobs(t *testing.T) {
 		wrong, err := openBytes("synthetic.edf", data, []byte("wrong-password"))
 		if err != nil || wrong.PasswordVerified() || safe && wrong.cipher != nil {
 			t.Fatalf("safe=%t: wrong password accepted", safe)
+		}
+	}
+}
+
+func TestEncryptedRowsDecodeEveryFieldType(t *testing.T) {
+	tests := []struct {
+		name     string
+		typeCode uint16
+		plain    []byte
+	}{
+		{"int32", 0x0003, binary.LittleEndian.AppendUint32(nil, 42)},
+		{"int64", 0x0019, binary.LittleEndian.AppendUint64(nil, 1<<40)},
+		{"true", 0x0005, []byte{1, 0}},
+		{"false", 0x0005, []byte{0, 0}},
+		{"date", 0x0009, binary.LittleEndian.AppendUint32(nil, 738886)},
+		{"zero_date", 0x0009, make([]byte, 4)},
+		{"time", 0x000a, binary.LittleEndian.AppendUint32(nil, 45296000)},
+		{"datetime", 0x000b, binary.LittleEndian.AppendUint64(nil, math.Float64bits(738886*86400000+45296000))},
+		{"zero_datetime", 0x000b, make([]byte, 8)},
+		{"unknown", 0xffff, []byte{1, 2, 3, 4, 5}},
+	}
+	for _, mode := range []struct {
+		name string
+		key  []byte
+	}{{"standard", []byte(standardEncryptionKey)}, {"safe", []byte("synthetic-password")}} {
+		for _, test := range tests {
+			t.Run(test.name+"/"+mode.name, func(t *testing.T) {
+				field := Field{Name: "Value", TypeCode: test.typeCode, RawWidth: len(test.plain), SlotOffset: 40}
+				table := &Table{
+					Fields: []Field{{Name: "Id", TypeCode: 0x2001, RawWidth: 33, SlotOffset: 7}, field},
+					Layout: &RecordLayout{BitmapSize: 1},
+				}
+				payload := make([]byte, 33+len(test.plain))
+				copy(payload, "aaed9485e7514a4c81730acee0005420")
+				copy(payload[33:], test.plain)
+				record := make([]byte, 7+len(payload))
+				copy(record, aaMagic)
+				copy(record[7:], encryptTinyDBEMCTSForTest(t, payload, mode.key))
+				block, err := newBlowfishCipher(mode.key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				database := &File{cipher: block, password: mode.key}
+				row, err := database.decodeRecord(table, record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := decodeRawValue(nil, field, test.plain)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := row.Values[field.Name]; !reflect.DeepEqual(got, want) {
+					t.Fatalf("decoded encrypted %s = %#v, want %#v", test.name, got, want)
+				}
+			})
 		}
 	}
 }

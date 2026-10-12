@@ -288,27 +288,11 @@ func (f *File) decodeRecord(table *Table, record []byte) (DecodedRow, error) {
 }
 
 func (f *File) decodeFieldValue(field Field, raw []byte, decryptedPayload []byte, payloadOffset int) (DecodedValue, error) {
-	if len(decryptedPayload) > 0 && shouldTryDecryptedField(field.TypeCode) {
+	if len(decryptedPayload) > 0 {
 		start := field.SlotOffset - payloadOffset
 		end := start + field.RawWidth
 		if start >= 0 && end <= len(decryptedPayload) {
-			decoded, err := decodeRawValueWithPassword(f.data, field, decryptedPayload[start:end], f.password)
-			if err != nil {
-				return DecodedValue{}, err
-			}
-			if decoded.Kind != DecodedRaw {
-				return decoded, nil
-			}
-		}
-	}
-	if f.cipher != nil && shouldTryDecryptedField(field.TypeCode) {
-		decryptedField := decryptTinyDBEMCTSWithBlock(raw, f.cipher)
-		decoded, err := decodeRawValueWithPassword(f.data, field, decryptedField, f.password)
-		if err != nil {
-			return DecodedValue{}, err
-		}
-		if decoded.Kind != DecodedRaw {
-			return decoded, nil
+			return decodeRawValueWithPassword(f.data, field, decryptedPayload[start:end], f.password)
 		}
 	}
 

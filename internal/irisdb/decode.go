@@ -222,15 +222,6 @@ func decodeFloatMillisSinceYearOne(totalMillis float64) time.Time {
 	return date.Add(time.Duration(msOfDay * float64(time.Millisecond)))
 }
 
-func shouldTryDecryptedField(typeCode uint16) bool {
-	switch typeCode {
-	case 0x000f, 0x0010, 0x0027, 0x1e18, 0x2001, 0x2201, 0x4018, 0x8018:
-		return true
-	default:
-		return false
-	}
-}
-
 func decodeBlobRef(data []byte, raw []byte, password []byte, allowNonZeroReserved bool) (*BlobRef, bool, error) {
 	if len(raw) < 24 {
 		return nil, false, nil
